@@ -69,8 +69,38 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Filter by price ceiling and size before scoring relevance.
+    candidates = []
+    for item in listings:
+        if max_price is not None and item["price"] > max_price:
+            continue
+        if size is not None and size.lower() not in item["size"].lower():
+            continue
+        candidates.append(item)
+
+    # Score each candidate by how many query keywords it matches.
+    keywords = [w for w in description.lower().split() if len(w) > 2]
+
+    scored = []
+    for item in candidates:
+        haystack = " ".join([
+            item["title"],
+            item["description"],
+            item["category"],
+            " ".join(item["style_tags"]),
+            " ".join(item["colors"]),
+            item["brand"] or "",
+        ]).lower()
+
+        score = sum(1 for word in keywords if word in haystack)
+        if score > 0:
+            scored.append((score, item))
+
+    # Best match first.
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
