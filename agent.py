@@ -18,7 +18,62 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+_SIZE_WORDS = ["xxs", "xs", "s", "m", "l", "xl", "xxl"]
+
+
+def _parse_query(query: str) -> dict:
+    """
+    Pull a description, optional size, and optional max_price out of a
+    natural-language query using regex.
+
+    "vintage graphic tee under $30, size M"
+        -> {"description": "vintage graphic tee", "size": "M", "max_price": 30.0}
+    """
+    text = query.strip()
+    lowered = text.lower()
+
+    # max_price: a number following under / below / less than / cheaper than / $.
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|cheaper than|max|<)\s*\$?\s*(\d+(?:\.\d+)?)"
+        r"|\$\s*(\d+(?:\.\d+)?)",
+        lowered,
+    )
+    if price_match:
+        amount = price_match.group(1) or price_match.group(2)
+        max_price = float(amount)
+
+    # size: prefer an explicit "size X", otherwise a standalone size token.
+    size = None
+    size_match = re.search(r"\bsize\s+([a-z0-9]+)\b", lowered)
+    if size_match:
+        size = size_match.group(1).upper()
+    else:
+        for token in re.findall(r"\b[a-z]+\b", lowered):
+            if token in _SIZE_WORDS and token not in ("s", "m", "l"):
+                size = token.upper()
+                break
+
+    # description: strip the price phrase and any "size ..." phrase, keep the rest.
+    description = re.sub(
+        r"(?:under|below|less than|cheaper than|max|<)\s*\$?\s*\d+(?:\.\d+)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\$\s*\d+(?:\.\d+)?", "", description)
+    description = re.sub(r"\bsize\s+[a-z0-9]+\b", "", description, flags=re.IGNORECASE)
+    description = description.replace(",", " ").strip()
+    description = re.sub(r"\s+", " ", description)
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +147,46 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: fresh session for this interaction.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the query into search parameters.
+    session["parsed"] = _parse_query(query)
+    parsed = session["parsed"]
+
+    # Step 3: search. Branch on the result — empty means stop here.
+    session["search_results"] = search_listings(
+        parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    if not session["search_results"]:
+        bits = []
+        if parsed["size"]:
+            bits.append(f"size {parsed['size']}")
+        if parsed["max_price"] is not None:
+            bits.append(f"under ${parsed['max_price']:.0f}")
+        filters = f" ({', '.join(bits)})" if bits else ""
+        session["error"] = (
+            f"No listings matched \"{parsed['description']}\"{filters}. "
+            "Try loosening the size or price, or describing it differently."
+        )
+        return session  # do NOT call the other tools with empty input
+
+    # Step 4: select the top-ranked listing to carry forward.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: suggest an outfit using the selected item + wardrobe.
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+
+    # Step 6: turn that into a shareable fit card.
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
+    # Step 7: return the completed session.
     return session
 
 
