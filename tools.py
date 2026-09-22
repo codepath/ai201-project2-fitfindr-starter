@@ -24,6 +24,9 @@ load_dotenv()
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
+MODEL = "llama-3.3-70b-versatile"
+
+
 def _get_groq_client():
     """Initialize and return a Groq client using GROQ_API_KEY from .env."""
     api_key = os.environ.get("GROQ_API_KEY")
@@ -32,6 +35,17 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _ask_llm(prompt: str, temperature: float = 0.7) -> str:
+    """Send a single prompt to the LLM and return the text reply."""
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +83,38 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Filter by price ceiling and size before scoring relevance.
+    candidates = []
+    for item in listings:
+        if max_price is not None and item["price"] > max_price:
+            continue
+        if size is not None and size.lower() not in item["size"].lower():
+            continue
+        candidates.append(item)
+
+    # Score each candidate by how many query keywords it matches.
+    keywords = [w for w in description.lower().split() if len(w) > 2]
+
+    scored = []
+    for item in candidates:
+        haystack = " ".join([
+            item["title"],
+            item["description"],
+            item["category"],
+            " ".join(item["style_tags"]),
+            " ".join(item["colors"]),
+            item["brand"] or "",
+        ]).lower()
+
+        score = sum(1 for word in keywords if word in haystack)
+        if score > 0:
+            scored.append((score, item))
+
+    # Best match first.
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +144,39 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_line = f"{new_item['title']} ({new_item['category']}, " \
+                f"colors: {', '.join(new_item['colors'])}, " \
+                f"style: {', '.join(new_item['style_tags'])})"
+
+    items = wardrobe.get("items", [])
+
+    if not items:
+        # Empty wardrobe — give general styling advice instead of failing.
+        prompt = (
+            f"A shopper just found this secondhand item: {item_line}.\n"
+            "They haven't told us what's in their closet yet. In 2-3 sentences, "
+            "suggest what kinds of pieces would pair well with it and what vibe "
+            "it suits. Keep it friendly and practical."
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {it['name']} ({it['category']})" for it in items
+        )
+        prompt = (
+            f"A shopper just found this secondhand item: {item_line}.\n\n"
+            f"Here is what's already in their closet:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits that pair the new item with specific "
+            "pieces from their closet (name the pieces). Keep it to a few "
+            "sentences and make it sound like a stylish friend giving advice."
+        )
+
+    try:
+        return _ask_llm(prompt, temperature=0.7)
+    except Exception:
+        return (
+            "Couldn't generate an outfit suggestion right now, but this piece is "
+            "versatile — try pairing it with neutral basics and your go-to shoes."
+        )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +208,23 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "Can't make a fit card without an outfit suggestion to work from."
+
+    prompt = (
+        "Write a short, casual social-media caption (2-4 sentences) for an "
+        "outfit post about a secondhand find. Sound like a real person posting "
+        "their fit, not a product listing. You can use an emoji or two.\n\n"
+        f"Item: {new_item['title']} — ${new_item['price']:.0f} on {new_item['platform']}\n"
+        f"How they're styling it: {outfit}\n\n"
+        "Mention the item name, price, and platform naturally (once each)."
+    )
+
+    try:
+        # Higher temperature so captions vary for different inputs.
+        return _ask_llm(prompt, temperature=1.0)
+    except Exception:
+        return (
+            f"thrifted this {new_item['title']} off {new_item['platform']} for "
+            f"${new_item['price']:.0f} and i'm obsessed ✨"
+        )
